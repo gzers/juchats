@@ -8,7 +8,10 @@ import httpx
 import pydantic
 import websockets
 from loguru import logger
-import redislite
+# import redislite
+import os
+from redis import Redis
+from typing import AsyncGenerator
 
 from .configs import APIS, HEADERS
 from .types import Mode
@@ -22,15 +25,33 @@ def get_headers(token: str):
 
 class Juchats(object):
     _modes = None
-    _redis = redislite.Redis('/tmp/juchats_redis.db')
+    # _redis = redislite.Redis('/tmp/juchats_redis.db')
 
     def __init__(self, token: str, model: str = "deepseek-chat"):
+        self._redis = Redis(
+            host=os.getenv('REDIS_HOST', 'localhost'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=int(os.getenv('REDIS_DB', 0)),
+            decode_responses=True
+        )
+
         self.token = token
         self.model = model
         self._header = get_headers(token)
         self._model_id = None
         self._dialog_id = None
         self._initialized = False
+
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        # 执行异步初始化操作（例如建立网络连接、验证 API Key 等）
+        await self._async_connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器退出"""
+        # 执行异步清理操作（例如关闭连接）
+        await self._async_close()
 
     async def initialize(self):
         if self._initialized:
@@ -59,12 +80,14 @@ class Juchats(object):
         if cached_models:
             logger.info("get models from cache")
             cached_data = json.loads(cached_models)
+            logger.info(cached_data)
             if time.time() < cached_data['expiry']:
                 return [Mode(**x) for x in cached_data['modes']]
 
         # If not in cache or expired, fetch from API
         async with httpx.AsyncClient() as client:
             response = await client.get(APIS.MODES, headers=self._header)
+            logger.debug(response)
             data = response.json()['data']
             modes = []
             for item in data:
@@ -157,43 +180,126 @@ class Juchats(object):
             except Exception as e:
                 logger.error(f"Error occurred: {e}")
 
-    async def stream_chat(
-        self,
-        query: str,
-    ):
+    # async def stream_chat(
+    #     self,
+    #     query: str,
+    # ):
+    #     await self._ensure_initialized()
+    #     dialog_id = await self.get_dialog_id()
+    #     model_id = await self.get_model_id()
+    #     _type = await self.get_type()
+    #     async with websockets.connect(APIS.WSS.format(self.token),
+    #                                   extra_headers=self._header) as ws:
+    #         message = {
+    #             "contextId": '',
+    #             "dialogId": dialog_id,
+    #             "event": 1,
+    #             "fileUuid": "",
+    #             "languageTypeId": 0,
+    #             "modeId": model_id,
+    #             "prompt": query,
+    #             "requestId": str(uuid4()),
+    #             "type": _type,
+    #             "tools": {
+    #                 "id":"BROWSING",
+    #                 "name":"Browsing"
+    #             }
+    #         }
+    #
+    #         url = APIS.WSS.format(self.token)
+    #         logger.info(f"Connecting to: {url}")
+    #         logger.debug(f"Headers: {self._header}")
+    #         logger.info(f"Connected to: {ws.remote_address}")
+    #         logger.debug(json.dumps(message))
+    #
+    #         await ws.send(json.dumps(message))
+    #
+    #         try:
+    #             while True:
+    #                 response = await ws.recv()
+    #                 if '[DONE]' in response:
+    #                     break
+    #                 js = json.loads(response)
+    #                 content = js.get('data', {}).get('content')
+    #                 if content:
+    #                     yield content
+    #                 if int(js.get('code', 200)) != 200:
+    #                     logger.info(js)
+    #                     break
+    #         except websockets.ConnectionClosed:
+    #             logger.error("Connection closed by the server.")
+    #         except Exception as e:
+    #             logger.error(f"Error occurred: {e}")
+
+    async def stream_chat(self, query: str) -> AsyncGenerator[str, None]:
         await self._ensure_initialized()
         dialog_id = await self.get_dialog_id()
         model_id = await self.get_model_id()
         _type = await self.get_type()
-        async with websockets.connect(APIS.WSS.format(self.token),
-                                      extra_headers=self._header) as ws:
-            message = {
-                "contextId": '',
-                "dialogId": dialog_id,
-                "event": 1,
-                "fileUuid": "",
-                "languageTypeId": 0,
-                "modeId": model_id,
-                "prompt": query,
-                "requestId": str(uuid4()),
-                "type": _type,
+
+        message = {
+            "contextId": '',
+            "dialogId": dialog_id,
+            "event": 1,
+            "fileUuid": "",
+            "languageTypeId": 0,
+            "modeId": model_id,
+            "prompt": query,
+            "requestId": str(uuid4()),
+            "type": _type,
+            "tools": {
+                "id": "BROWSING",
+                "name": "Browsing"
             }
+        }
 
-            await ws.send(json.dumps(message))
+        url = APIS.SSE.format(self.token)
+        headers = self._header
+        headers['Content-Type'] = 'application/json'
+        headers['Accept'] = 'text/event-stream'
 
+        async with httpx.AsyncClient(headers=headers) as client:
             try:
-                while True:
-                    response = await ws.recv()
-                    if '[DONE]' in response:
-                        break
-                    js = json.loads(response)
-                    content = js.get('data', {}).get('content')
-                    if content:
-                        yield content
-                    if int(js.get('code', 200)) != 200:
-                        logger.info(js)
-                        break
-            except websockets.ConnectionClosed:
-                logger.error("Connection closed by the server.")
-            except Exception as e:
-                logger.error(f"Error occurred: {e}")
+                response = await client.post(url, json=message, timeout=60.0)
+                logger.info(f"Response status: {response.status_code}")
+                if response.status_code == 200:
+                    event_data = ""
+                    event_type = "message"
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            # 空行表示事件结束
+                            if event_type == "message" and event_data:
+                                try:
+                                    data = json.loads(event_data)
+                                    content = data.get('data', {}).get('content')
+                                    if content:
+                                        yield content
+                                    else:
+                                        logger.warning(f"Received response without content: {data}")
+                                except json.JSONDecodeError:
+                                    logger.error(f"Failed to decode JSON: {event_data}")
+                            elif event_type == "done":
+                                logger.info("Received [DONE], closing connection.")
+                                break
+                            event_data = ""
+                            event_type = "message"
+                        elif line.startswith('data:'):
+                            if line == 'data:[DONE]':
+                                event_type = "done"
+                            else:
+                                event_data += line[len('data:'):].strip() + "\n"
+                        elif line.startswith('event:'):
+                            event_type = line[len('event:'):].strip()
+                else:
+                    logger.error(f"Request failed with status {response.status_code}")
+            except httpx.ReadTimeout as rt:
+                logger.error(f"Request timed out: {rt}")
+            except httpx.RequestError as re:
+                logger.error(f"Request error: {re}")
+
+    async def _async_close(self):
+        pass
+
+    async def _async_connect(self):
+        pass
