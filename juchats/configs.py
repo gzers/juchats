@@ -5,6 +5,7 @@ class APIS(object):
     SSE = 'https://www.juchats.com/gw/chatgpt/gpt/completions'
     DIALOGS='https://www.juchats.com/gw/chatweb/gpt/dialogs'
     CREATE_DIALOG='https://www.juchats.com/gw/chatweb/gpt/createDialog'
+    CLEAR_CHATS='https://www.juchats.com/gw/chatweb/gpt/clearChats'
 
 
 HEADERS = {

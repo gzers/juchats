@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from juchats.chat import Juchats
 import time
 import json
-import asyncio
+import re
 from loguru import logger
 
 app = FastAPI()
@@ -68,6 +68,66 @@ async def chat_completion(request: Request, chat_request: ChatCompletionRequest)
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
+@app.post("/v1/new_stream/chat/completions")
+async def chat_completion(request: Request, chat_request: ChatCompletionRequest):
+    try:
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key:
+            raise HTTPException(status_code=401, detail="Missing API key")
+
+        juchats = Juchats(api_key, model=chat_request.model)
+        logger.info(f"Received request: {chat_request}")
+
+        user_message = [msg['content']
+                        for msg in chat_request.messages if msg['role'] == 'user'].pop()
+        prompt = f"{user_message}"
+        logger.info(f"inputing prompt: {prompt}")
+
+        async def event_generator():
+            try:
+                async for chunk in juchats.stream_chat2(prompt):
+                    yield f"data: {json.dumps(format_chunk(chunk, chat_request))}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                error_message = f"Error during streaming: {str(e)}"
+                logger.error(error_message)
+                yield f"data: {json.dumps({'error': error_message})}\n\n"
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    except Exception as e:
+        error_message = f"Error processing request: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.post("/v1/new_normal/chat/completions")
+async def chat_completion(request: Request, chat_request: ChatCompletionRequest):
+    try:
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key:
+            raise HTTPException(status_code=401, detail="Missing API key")
+
+        juchats = Juchats(api_key, model=chat_request.model)
+        logger.info(f"Received request: {chat_request}")
+
+        user_message = [msg['content']
+                        for msg in chat_request.messages if msg['role'] == 'user'].pop()
+        prompt = f"{user_message}"
+        logger.info(f"inputing prompt: {prompt}")
+
+        async with juchats:
+            response = await juchats.chat2(prompt)
+            logger.info(response)
+            rs = format_non_stream_response(response, chat_request)
+            logger.info(rs)
+        return rs
+
+    except Exception as e:
+        error_message = f"Error processing request: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
 
 def format_chunk(chunk, chat_request):
     return {
@@ -87,14 +147,48 @@ def format_chunk(chunk, chat_request):
     }
 
 
+def parse_html_content(html_string):
+    start_tag = "<think>"
+    end_tag = "</think>"
+
+    # Find the positions of the think tags
+    start = html_string.find(start_tag)
+    if start == -1:
+        think_content = ''
+        remaining_text = html_string
+    else:
+        end = html_string.find(end_tag, start + len(start_tag))
+        if end == -1:
+            think_content = ''
+            remaining_text = html_string
+        else:
+            think_content = html_string[start + len(start_tag):end].strip()
+            remaining_text = html_string[:start].strip() + ' ' + html_string[end + len(end_tag):].strip()
+
+    # Find all HERMSTDUIO{xxx} patterns
+    hermstudio_pattern = r'HERMSTDUIO\{([^}]*)}'
+    hermstudio_matches = re.findall(hermstudio_pattern, remaining_text)
+
+    # Remove HERMSTDUIO{xxx} patterns from remaining_text
+    remaining_text = re.sub(hermstudio_pattern, '', remaining_text).strip()
+
+    return {
+        'think_field': think_content,
+        'main_field': remaining_text,
+        'hermstudio_field': hermstudio_matches
+    }
+
 def format_non_stream_response(response, chat_request):
+    new_text = parse_html_content(response)
     return {
         "choices": [
             {
                 "finish_reason": "stop",
                 "index": 0,
                 "message": {
-                    "content": response,
+                    "content": new_text["main_field"],
+                    "reasoning_content": new_text["think_field"],
+                    "link_content": new_text["hermstudio_field"],
                     "role": "assistant"
                 },
                 "logprobs": None
@@ -146,6 +240,18 @@ async def get_models(request: Request):
         "data": formatted_models
     }
 
+@app.get("/v1/clear_chats")
+async def clear_chats(request: Request):
+    api_key = request.headers.get('Authorization', '').replace('Bearer ', '')
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
+
+    juchats = Juchats(api_key)
+    async with juchats:
+        rs = await juchats.clear_chats()
+
+
+    return rs
 
 if __name__ == "__main__":
     import uvicorn
