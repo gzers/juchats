@@ -68,6 +68,7 @@ async def chat_completion(request: Request, chat_request: ChatCompletionRequest)
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message)
 
+
 @app.post("/v1/new_stream/chat/completions")
 async def chat_completion(request: Request, chat_request: ChatCompletionRequest):
     try:
@@ -100,6 +101,7 @@ async def chat_completion(request: Request, chat_request: ChatCompletionRequest)
         error_message = f"Error processing request: {str(e)}"
         logger.error(error_message)
         raise HTTPException(status_code=500, detail=error_message)
+
 
 @app.post("/v1/new_normal/chat/completions")
 async def chat_completion(request: Request, chat_request: ChatCompletionRequest):
@@ -166,17 +168,47 @@ def parse_html_content(html_string):
             think_content = html_string[start + len(start_tag):end].strip()
             remaining_text = html_string[:start].strip() + ' ' + html_string[end + len(end_tag):].strip()
 
-    # Find all HERMSTDUIO{xxx} patterns
-    hermstudio_pattern = r'HERMSTDUIO\{([^}]*)}'
-    hermstudio_matches = re.findall(hermstudio_pattern, remaining_text)
+    # Define the HERMSTDUIO pattern to match HERMSTDUIO and everything after it until the end of the string
+    hermstudio_pattern = r'HERMSTDUIO.*'
 
-    # Remove HERMSTDUIO{xxx} patterns from remaining_text
+    hermstudio_matches = []
+
+    start = html_string.find('HERMSTDUIO')
+    if start != -1:
+        extracted_part = html_string[start + len('HERMSTDUIO'):]
+        hermstudio_matches.append(extracted_part)
+        print(hermstudio_matches)
+    else:
+        print("HERMSTDUIO not found in the source string")
+
+    # Remove HERMSTDUIO and subsequent characters until the end of the string from remaining_text
     remaining_text = re.sub(hermstudio_pattern, '', remaining_text).strip()
+
+    # Parse HERMSTDUIO data
+    hermstudio_data = []
+    if hermstudio_matches:
+        for match in hermstudio_matches:
+            # 去除 HTML 注释符号
+            cleaned_json = match.replace('<!--', '').replace('-->', '')
+
+            # 打印调试信息
+            logger.info("HERMSTDUIO Match: %s", cleaned_json)
+
+            try:
+                data = json.loads(cleaned_json)
+                hermstudio_data.append(data)
+                logger.info("Parsed HERMSTDUIO data: %s", data)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse JSON: %s - Content: %s", e, repr(cleaned_json))
+                import traceback
+                traceback.print_exc()
+    else:
+        logger.warning("No HERMSTDUIO content found")
 
     return {
         'think_field': think_content,
         'main_field': remaining_text,
-        'hermstudio_field': hermstudio_matches
+        'hermstudio_field': hermstudio_data
     }
 
 def format_non_stream_response(response, chat_request):
@@ -250,7 +282,6 @@ async def clear_chats(request: Request):
     juchats = Juchats(api_key)
     async with juchats:
         rs = await juchats.clear_chats()
-
 
     return rs
 
