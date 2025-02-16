@@ -24,13 +24,24 @@ class Juchats(object):
     _modes = None
     _redis = redislite.Redis('/tmp/juchats_redis.db')
 
-    def __init__(self, token: str, model: str = "deepseek-chat"):
+    def __init__(self, token: str, model: str = "deepseek-ai/deepseek-r1"):
         self.token = token
         self.model = model
         self._header = get_headers(token)
         self._model_id = None
         self._dialog_id = None
         self._initialized = False
+
+    async def __aenter__(self):
+        """异步上下文管理器入口"""
+        # 执行异步初始化操作（例如建立网络连接、验证 API Key 等）
+        await self._async_connect()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """异步上下文管理器退出"""
+        # 执行异步清理操作（例如关闭连接）
+        await self._async_close()
 
     async def initialize(self):
         if self._initialized:
@@ -157,6 +168,77 @@ class Juchats(object):
             except Exception as e:
                 logger.error(f"Error occurred: {e}")
 
+    async def chat2(self, query: str):
+        await self._ensure_initialized()
+        dialog_id = await self.get_dialog_id()
+        model_id = await self.get_model_id()
+        _type = await self.get_type()
+
+        message = {
+            "contextId": '',
+            "dialogId": dialog_id,
+            "event": 1,
+            "fileUuid": "",
+            "languageTypeId": 0,
+            "modeId": model_id,
+            "prompt": query,
+            "requestId": str(uuid4()),
+            "type": _type,
+            "tools": {
+                "id": "BROWSING",
+                "name": "Browsing"
+            }
+        }
+
+        url = APIS.SSE.format(self.token)
+        headers = self._header
+        headers['Content-Type'] = 'application/json'
+        headers['Accept'] = 'text/event-stream'
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            try:
+                text = ''
+                response = await client.post(url, json=message, timeout=60.0)
+                logger.info(f"Response status: {response.status_code}")
+                if response.status_code == 200:
+                    event_data = ""
+                    event_type = "message"
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            # 空行表示事件结束
+                            if event_type == "message" and event_data:
+                                try:
+                                    data = json.loads(event_data)
+                                    content = data.get('data', {}).get('content')
+                                    if content:
+                                        text += content
+                                    if int(data.get('code', 200)) != 200:
+                                        logger.info(data)
+                                        return text
+                                    else:
+                                        logger.warning(f"Received response without content: {data}")
+                                except json.JSONDecodeError:
+                                    logger.error(f"Failed to decode JSON: {event_data}")
+                            elif event_type == "done":
+                                logger.info("Received [DONE], closing connection.")
+                                return text
+                            event_data = ""
+                            event_type = "message"
+                        elif line.startswith('data:'):
+                            if line == 'data:[DONE]':
+                                event_type = "done"
+                            else:
+                                event_data += line[len('data:'):].strip() + "\n"
+                        elif line.startswith('event:'):
+                            event_type = line[len('event:'):].strip()
+                else:
+                    logger.error(f"Request failed with status {response.status_code}")
+            except httpx.ReadTimeout as rt:
+                logger.error(f"Request timed out: {rt}")
+            except httpx.RequestError as re:
+                logger.error(f"Request error: {re}")
+
     async def stream_chat(
         self,
         query: str,
@@ -197,3 +279,91 @@ class Juchats(object):
                 logger.error("Connection closed by the server.")
             except Exception as e:
                 logger.error(f"Error occurred: {e}")
+
+    async def stream_chat2(self, query: str):
+        await self._ensure_initialized()
+        dialog_id = await self.get_dialog_id()
+        model_id = await self.get_model_id()
+        _type = await self.get_type()
+
+        message = {
+            "contextId": '',
+            "dialogId": dialog_id,
+            "event": 1,
+            "fileUuid": "",
+            "languageTypeId": 0,
+            "modeId": model_id,
+            "prompt": query,
+            "requestId": str(uuid4()),
+            "type": _type,
+            "tools": {
+                "id": "BROWSING",
+                "name": "Browsing"
+            }
+        }
+
+        url = APIS.SSE.format(self.token)
+        headers = self._header
+        headers['Content-Type'] = 'application/json'
+        headers['Accept'] = 'text/event-stream'
+
+        async with httpx.AsyncClient(headers=headers) as client:
+            try:
+                response = await client.post(url, json=message, timeout=60.0)
+                logger.info(f"Response status: {response.status_code}")
+                if response.status_code == 200:
+                    event_data = ""
+                    event_type = "message"
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            # 空行表示事件结束
+                            if event_type == "message" and event_data:
+                                try:
+                                    data = json.loads(event_data)
+                                    content = data.get('data', {}).get('content')
+                                    if content:
+                                        yield content
+                                    else:
+                                        logger.warning(f"Received response without content: {data}")
+                                except json.JSONDecodeError:
+                                    logger.error(f"Failed to decode JSON: {event_data}")
+                            elif event_type == "done":
+                                logger.info("Received [DONE], closing connection.")
+                                break
+                            event_data = ""
+                            event_type = "message"
+                        elif line.startswith('data:'):
+                            if line == 'data:[DONE]':
+                                event_type = "done"
+                            else:
+                                event_data += line[len('data:'):].strip() + "\n"
+                        elif line.startswith('event:'):
+                            event_type = line[len('event:'):].strip()
+                else:
+                    logger.error(f"Request failed with status {response.status_code}")
+            except httpx.ReadTimeout as rt:
+                logger.error(f"Request timed out: {rt}")
+            except httpx.RequestError as re:
+                logger.error(f"Request error: {re}")
+
+    async def clear_chats(self) -> int:
+        async with httpx.AsyncClient() as client:
+            await self._ensure_initialized()
+            _type = await self.get_type()
+            dialog_id = await self.get_dialog_id()
+            logger.info(dialog_id)
+            _type = await self.get_type()
+            response = await client.post(APIS.CLEAR_CHATS,
+                                         headers=self._header,
+                                         json={
+                                             "id": dialog_id,
+                                         })
+            response.raise_for_status()
+            return response.json()
+
+    async def _async_close(self):
+        pass
+
+    async def _async_connect(self):
+        pass
