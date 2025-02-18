@@ -82,20 +82,36 @@ async def chat_completion(request: Request, chat_request: ChatCompletionRequest)
 
         user_message = [msg['content']
                         for msg in chat_request.messages if msg['role'] == 'user'].pop()
-        prompt = f"{user_message}"
-        logger.info(f"inputing prompt: {prompt}")
 
-        async def event_generator():
-            try:
-                async for chunk in juchats.stream_chat2(prompt):
-                    yield f"data: {json.dumps(format_chunk(chunk, chat_request))}\n\n"
+        # 检查是否是重置对话的请求
+        if user_message.strip() == "重置对话":
+            juchats = Juchats(api_key)
+            async with juchats:
+                clear_result = await juchats.clear_chats()
+                logger.info(f"Chat history cleared: {clear_result}")
+            
+            async def reset_response():
+                yield f"data: {json.dumps(format_chunk('对话已重置', chat_request))}\n\n"
                 yield "data: [DONE]\n\n"
-            except Exception as e:
-                error_message = f"Error during streaming: {str(e)}"
-                logger.error(error_message)
-                yield f"data: {json.dumps({'error': error_message})}\n\n"
+            
+            return StreamingResponse(reset_response(), media_type="text/event-stream")
 
-        return StreamingResponse(event_generator(), media_type="text/event-stream")
+        # 原有的对话处理逻辑
+        else:
+            prompt = f"{user_message}"
+            logger.info(f"inputing prompt: {prompt}")
+
+            async def event_generator():
+                try:
+                    async for chunk in juchats.stream_chat2(prompt):
+                        yield f"data: {json.dumps(format_chunk(chunk, chat_request))}\n\n"
+                    yield "data: [DONE]\n\n"
+                except Exception as e:
+                    error_message = f"Error during streaming: {str(e)}"
+                    logger.error(error_message)
+                    yield f"data: {json.dumps({'error': error_message})}\n\n"
+
+            return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     except Exception as e:
         error_message = f"Error processing request: {str(e)}"
@@ -116,15 +132,29 @@ async def chat_completion(request: Request, chat_request: ChatCompletionRequest)
 
         user_message = [msg['content']
                         for msg in chat_request.messages if msg['role'] == 'user'].pop()
-        prompt = f"{user_message}"
-        logger.info(f"inputing prompt: {prompt}")
+        
 
-        async with juchats:
-            response = await juchats.chat2(prompt)
-            logger.info(response)
-            rs = format_non_stream_response(response, chat_request)
-            logger.info(rs)
-        return rs
+       # 检查是否是重置对话的请求
+        if user_message.strip() == "重置对话":
+            # 创建 Juchats 实例并清除聊天记录
+            juchats = Juchats(api_key)
+            async with juchats:
+                clear_result = await juchats.clear_chats()
+                logger.info(f"Chat history cleared: {clear_result}")
+            
+            # 返回清除成功的消息
+            return format_non_stream_response("对话已重置", chat_request)
+        # 原有的对话处理逻辑
+        else:
+            prompt = f"{user_message}"
+            logger.info(f"inputing prompt: {prompt}")
+
+            async with juchats:
+                response = await juchats.chat2(prompt)
+                logger.info(response)
+                rs = format_non_stream_response(response, chat_request)
+                logger.info(rs)
+            return rs
 
     except Exception as e:
         error_message = f"Error processing request: {str(e)}"
