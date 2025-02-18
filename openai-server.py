@@ -285,6 +285,81 @@ async def clear_chats(request: Request):
 
     return rs
 
+@app.post("/v1/clear_then_stream_chat/chat/completions")
+async def clear_then_stream_chat(request: Request, chat_request: ChatCompletionRequest):
+    try:
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key:
+            raise HTTPException(status_code=401, detail="Missing API key")
+
+        # 先清除聊天记录
+        juchats = Juchats(api_key)
+        async with juchats:
+            clear_result = await juchats.clear_chats()
+            logger.info(f"Chat history cleared: {clear_result}")
+
+        # 创建新的流式对话
+        juchats = Juchats(api_key, model=chat_request.model)
+        logger.info(f"Received request: {chat_request}")
+
+        user_message = [msg['content']
+                        for msg in chat_request.messages if msg['role'] == 'user'].pop()
+        prompt = f"{user_message}"
+        logger.info(f"inputing prompt: {prompt}")
+
+        async def event_generator():
+            try:
+                async for chunk in juchats.stream_chat2(prompt):
+                    yield f"data: {json.dumps(format_chunk(chunk, chat_request))}\n\n"
+                yield "data: [DONE]\n\n"
+            except Exception as e:
+                error_message = f"Error during streaming: {str(e)}"
+                logger.error(error_message)
+                yield f"data: {json.dumps({'error': error_message})}\n\n"
+
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    except Exception as e:
+        error_message = f"Error processing request: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
+@app.post("/v1/clear_then_normal_chat/chat/completions")
+async def clear_then_normal_chat(request: Request, chat_request: ChatCompletionRequest):
+    try:
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key:
+            raise HTTPException(status_code=401, detail="Missing API key")
+
+        # 先清除聊天记录
+        juchats = Juchats(api_key)
+        async with juchats:
+            clear_result = await juchats.clear_chats()
+            logger.info(f"Chat history cleared: {clear_result}")
+
+        # 创建新的对话
+        juchats = Juchats(api_key, model=chat_request.model)
+        logger.info(f"Received request: {chat_request}")
+
+        user_message = [msg['content']
+                        for msg in chat_request.messages if msg['role'] == 'user'].pop()
+        prompt = f"{user_message}"
+        logger.info(f"inputing prompt: {prompt}")
+
+        async with juchats:
+            response = await juchats.chat2(prompt)
+            logger.info(response)
+            rs = format_non_stream_response(response, chat_request)
+            logger.info(rs)
+        return rs
+
+    except Exception as e:
+        error_message = f"Error processing request: {str(e)}"
+        logger.error(error_message)
+        raise HTTPException(status_code=500, detail=error_message)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
